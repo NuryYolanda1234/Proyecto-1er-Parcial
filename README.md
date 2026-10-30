@@ -38,4 +38,4 @@ cmake -S C:\Proyecto -B C:\Proyecto\build
 cmake --build C:\Proyecto\build
 ```
 
-Después abre `C:\Proyecto\build\corredor_sfml.exe`.
+Después abre `file:///C:/Proyecto/index.html`.
