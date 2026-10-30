@@ -1,0 +1,493 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#b9e8ff">
+  <title>Carreritas Dino</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Trebuchet MS", "Arial Rounded MT Bold", Arial, sans-serif;
+      background: #d9f3ff;
+      color: #594878;
+    }
+    * { box-sizing: border-box; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      display: grid;
+      place-items: center;
+      padding: 18px;
+      background:
+        radial-gradient(circle at 12% 18%, #fff4bc 0 7%, transparent 7.3%),
+        radial-gradient(circle at 90% 82%, #f8d7f0 0 11%, transparent 11.3%),
+        linear-gradient(145deg, #c9efff, #f8e6fa 58%, #fff0d0);
+    }
+    main { width: min(100%, 1000px); text-align: center; }
+    h1 { margin: 0 0 10px; color: #8f5db8; font-size: clamp(1.35rem, 4vw, 2rem); }
+    .frame {
+      overflow: hidden;
+      border: 6px solid #fff;
+      border-radius: 24px;
+      background: #b9e8ff;
+      box-shadow: 0 12px 30px #785a9c35, 0 0 0 4px #eaa6d2;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 8 / 5;
+      touch-action: manipulation;
+      outline: none;
+    }
+    .help { margin: 12px 0 0; color: #61577a; font-size: .95rem; }
+    kbd {
+      padding: 2px 7px;
+      border: 1px solid #d5bee7;
+      border-radius: 6px;
+      background: #fff;
+      box-shadow: 0 2px 0 #c6a9dc;
+      font: inherit;
+    }
+  </style>
+</head>
+<body>
+<main>
+  <h1>🌈 Carreritas Dino 🦖</h1>
+  <div class="frame">
+    <canvas id="game" width="960" height="600" tabindex="0" aria-label="Juego Carreritas Dino"></canvas>
+  </div>
+  <p class="help">
+    <kbd>Espacio</kbd> saltar · <kbd>P</kbd> pausar · <kbd>M</kbd> sonido ·
+    También puedes tocar la pantalla para saltar.
+  </p>
+</main>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.querySelector("#game");
+  const ctx = canvas.getContext("2d");
+  const W = 960, H = 600, GROUND = 500, PLAYER_X = 145, PLAYER_W = 48, PLAYER_H = 72;
+  const palettes = [
+    { name: "Verde", body: "#39a95b", head: "#44b662", belly: "#bddb84", detail: "#ffb74d" },
+    { name: "Rosa", body: "#ce5b8f", head: "#eb7dab", belly: "#ffc4d3", detail: "#ffc55c" },
+    { name: "Cafe", body: "#8b5b37", head: "#a67044", belly: "#dcb984", detail: "#f2b44c" }
+  ];
+  const state = {
+    screen: "menu", selected: 0, selectedMenu: 0, selectedPause: 0,
+    level: 1, levelTime: 0, playerY: GROUND - PLAYER_H, velocity: 0,
+    spawnTime: 0, spawnDelay: 1.15, obstacles: [], distance: 0, animation: 0,
+    cloudTime: 0, muted: false, lastTime: 0
+  };
+  let audio = null;
+  let runningSource = null;
+  const rand = (min, max) => min + Math.random() * (max - min);
+
+  function soundContext() {
+    if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+    if (audio.state === "suspended") audio.resume();
+    return audio;
+  }
+  function tone(startHz, endHz, duration, volume = 0.12, type = "sine") {
+    if (state.muted) return;
+    const ac = soundContext(), osc = ac.createOscillator(), gain = ac.createGain();
+    const now = ac.currentTime;
+    osc.type = type;
+    osc.frequency.setValueAtTime(startHz, now);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(1, endHz), now + duration);
+    gain.gain.setValueAtTime(volume, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    osc.connect(gain).connect(ac.destination);
+    osc.start(now);
+    osc.stop(now + duration);
+  }
+  function startRunningSound() {
+    if (state.muted || runningSource) return;
+    const ac = soundContext(), length = ac.sampleRate;
+    const buffer = ac.createBuffer(1, length, ac.sampleRate);
+    const data = buffer.getChannelData(0);
+    const steps = [0, .25, .5, .75];
+    for (let i = 0; i < length; i++) {
+      const t = i / length;
+      let sample = 0;
+      for (let n = 0; n < steps.length; n++) {
+        const local = t - steps[n];
+        if (local < 0 || local > .2) continue;
+        const decay = Math.exp(-local * 25);
+        const phase = 2 * Math.PI * ((125 + (n % 2) * 18) * local - 100 * local * local);
+        const tap = 2 * Math.PI * (520 * local - 750 * local * local);
+        sample += (Math.sin(phase) * .68 + Math.sin(phase * 2) * .19 + Math.sin(tap) * .32)
+          * Math.min(1, local / .004) * decay;
+      }
+      data[i] = Math.max(-.32, Math.min(.32, sample * .25));
+    }
+    runningSource = ac.createBufferSource();
+    const gain = ac.createGain();
+    gain.gain.value = .24;
+    runningSource.buffer = buffer;
+    runningSource.loop = true;
+    runningSource.connect(gain).connect(ac.destination);
+    runningSource.onended = () => { runningSource = null; };
+    runningSource.start();
+  }
+  function stopRunningSound() {
+    if (runningSource) {
+      const source = runningSource;
+      runningSource = null;
+      try { source.stop(); } catch (_) {}
+    }
+  }
+  function syncAudio() {
+    if (state.screen === "game" && !state.paused && !state.over && !state.won && !state.muted)
+      startRunningSound();
+    else stopRunningSound();
+  }
+  function restart() {
+    state.level = 1; state.levelTime = 0; state.playerY = GROUND - PLAYER_H;
+    state.velocity = 0; state.spawnTime = 0; state.spawnDelay = 1.15;
+    state.obstacles = []; state.distance = 0; state.animation = 0;
+    state.paused = false; state.over = false; state.won = false;
+  }
+  function newGame() {
+    restart();
+    state.screen = "game";
+    soundContext();
+    syncAudio();
+  }
+  function polygon(points, color) {
+    ctx.fillStyle = color; ctx.beginPath();
+    ctx.moveTo(points[0][0], points[0][1]);
+    for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
+    ctx.closePath(); ctx.fill();
+  }
+  function rounded(x, y, w, h, radius, fill, stroke = null, line = 2) {
+    ctx.beginPath(); ctx.roundRect(x, y, w, h, radius);
+    ctx.fillStyle = fill; ctx.fill();
+    if (stroke) { ctx.lineWidth = line; ctx.strokeStyle = stroke; ctx.stroke(); }
+  }
+  function text(value, x, y, size, color = "#594878", weight = 700, align = "center") {
+    ctx.fillStyle = color; ctx.font = `${weight} ${size}px "Trebuchet MS", Arial, sans-serif`;
+    ctx.textAlign = align; ctx.textBaseline = "middle"; ctx.fillText(value, x, y);
+  }
+  function cloud(x, y, scale) {
+    ctx.fillStyle = "rgba(255,255,255,.92)";
+    for (const [dx, dy, r] of [[0, 15, 19], [21, 5, 24], [49, 1, 29], [77, 11, 22], [39, 20, 22]]) {
+      ctx.beginPath(); ctx.arc(x + dx * scale, y + dy * scale, r * scale, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  function mountain(x, base, width, height, color, snow = false) {
+    const peak = x + width * .48, z = 14;
+    polygon([[x, base], [peak, base - height], [x + width, base]], color);
+    polygon([[peak, base - height], [x + width, base], [x + width - z, base - z], [peak + 12, base - height * .38]], "rgba(45,76,108,.24)");
+    polygon([[peak, base - height], [x + width * .45, base], [x + width * .19, base]], "rgba(255,255,255,.12)");
+    if (snow) polygon([[peak, base - height], [peak - width * .12, base - height * .66],
+      [peak, base - height * .72], [peak + width * .13, base - height * .62]], "#fffdf2");
+  }
+  function tree(x, y, s, color = "#31934f") {
+    ctx.fillStyle = "rgba(38,80,48,.2)";
+    ctx.beginPath(); ctx.ellipse(x + 4*s, y, 22*s, 7*s, 0, 0, Math.PI*2); ctx.fill();
+    polygon([[x-5*s,y],[x+7*s,y],[x+7*s,y-35*s],[x-5*s,y-35*s]], "#865532");
+    polygon([[x,y-112*s],[x+30*s,y-53*s],[x+11*s,y-49*s],[x+33*s,y-17*s],[x-32*s,y-17*s],[x-11*s,y-49*s],[x-30*s,y-53*s]], color);
+    polygon([[x,y-112*s],[x+30*s,y-53*s],[x+4*s,y-48*s],[x+3*s,y-21*s],[x-2*s,y-21*s]], "rgba(25,82,52,.35)");
+    polygon([[x,y-83*s],[x+24*s,y-40*s],[x+2*s,y-43*s]], "rgba(255,255,255,.18)");
+  }
+  function house(x, y, s, wall, roof) {
+    ctx.fillStyle = "rgba(38,80,48,.18)";
+    ctx.beginPath(); ctx.ellipse(x+4*s, y, 42*s, 9*s, 0, 0, Math.PI*2); ctx.fill();
+    rounded(x-26*s, y-38*s, 54*s, 39*s, 4*s, wall, "rgba(255,255,255,.8)", 2*s);
+    polygon([[x-34*s,y-36*s],[x,y-64*s],[x+36*s,y-36*s],[x+28*s,y-31*s],[x,y-53*s],[x-26*s,y-31*s]],roof);
+    rounded(x-7*s,y-25*s,15*s,25*s,4*s,"#a76d56");
+    rounded(x-22*s,y-29*s,10*s,10*s,3*s,"#8ee2ef","#fff",1*s);
+    rounded(x+12*s,y-29*s,10*s,10*s,3*s,"#ffe28a","#fff",1*s);
+  }
+  function drawBackground(dt) {
+    const sky = ctx.createLinearGradient(0, 0, 0, 400);
+    sky.addColorStop(0, "#91d9ff"); sky.addColorStop(1, "#e5f7ff");
+    ctx.fillStyle = sky; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle = "rgba(255,238,154,.35)"; ctx.beginPath(); ctx.arc(814,105,66,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#ffe184"; ctx.beginPath(); ctx.arc(836,127,37,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = "#fff4c9"; ctx.beginPath(); ctx.arc(844,127,25,0,Math.PI*2); ctx.fill();
+    mountain(-95,390,360,145,"#aabed0",true);
+    mountain(120,390,370,188,"#96afc5",true);
+    mountain(400,392,420,155,"#a8bdca");
+    mountain(680,390,400,183,"#9cb4c7",true);
+    mountain(-55,412,340,104,"#82b2ad");
+    mountain(220,412,350,137,"#76a8a6");
+    mountain(520,412,380,112,"#82b2ad");
+    mountain(800,412,320,131,"#77a4a4");
+    state.cloudTime += dt * 18;
+    for (let i=0;i<4;i++) {
+      const start = [15,280,550,820][i], speed = i===2 ? .72 : 1;
+      cloud((start + state.cloudTime*speed) % 1100 - 90, [112,88,149,105][i], i===2?.75:.9);
+    }
+    for (const [x,y] of [[310,155],[349,134],[600,111]]) {
+      polygon([[x,y+5],[x+9,y],[x+16,y+6],[x+9,y+3]],"#557d91");
+      polygon([[x+9,y+3],[x+17,y+6],[x+25,y+1],[x+17,y+5]],"#557d91");
+    }
+    ctx.fillStyle = "#84cb78"; ctx.fillRect(0,340,W,260);
+    polygon([[0,397],[130,355],[290,389],[450,348],[610,390],[790,350],[960,392],[960,600],[0,600]],"#61ad69");
+    house(70,405,.88,"#f28a70","#c95962");
+    house(265,401,.68,"#ffe08e","#5da8d0");
+    house(700,405,.75,"#a5d6a7","#df7959");
+    house(900,408,.9,"#d4a0d4","#7561bd");
+    for (let i=0;i<7;i++) {
+      const depth = ((i/7 + state.distance/1800)%1);
+      const y=320+depth*280, s=.25+depth*.75, half=42+depth*540;
+      tree(480-half-25,y,s,i%2?"#399b58":"#49aa5c");
+      tree(480+half+25,y,s,i%2?"#49aa5c":"#399b58");
+    }
+    drawRoad();
+    for (const [x,y] of [[44,368],[145,383],[234,374],[757,378],[861,369],[921,389]]) {
+      ctx.fillStyle="#3c9951";
+      for (const [dx,dy,r] of [[0,0,13],[14,-3,14],[27,1,11]]) {
+        ctx.beginPath();ctx.arc(x+dx,y+dy,r,0,Math.PI*2);ctx.fill();
+      }
+    }
+  }
+  function drawRoad() {
+    polygon([[440,316],[520,316],[1090,600],[-130,600]],"#d8c28c");
+    polygon([[448,316],[512,316],[1025,600],[-65,600]],"#565c5c");
+    for(let i=0;i<10;i++) {
+      const d=((i/10 + state.distance/1350)%1), y=316+d*284;
+      const half=2+d*5, next=Math.min(1,d+.025+d*.04), y2=316+next*284;
+      polygon([[480-half,y],[480+half,y],[480+half*1.35,y2],[480-half*1.35,y2]],"#f5e8b3");
+    }
+    ctx.fillStyle="#7bc77c";ctx.fillRect(0,498,W,6);
+  }
+  function drawDino(x,y,scale,palette,run=0) {
+    ctx.save();ctx.translate(x,y);ctx.scale(scale,scale);
+    ctx.fillStyle="rgba(34,77,49,.24)";ctx.beginPath();ctx.ellipse(25,70,25,7,0,0,Math.PI*2);ctx.fill();
+    polygon([[-3,39],[15,31],[17,44]],palette.body);
+    rounded(10,31,34,29,8,palette.body);
+    rounded(25,44,18,13,6,palette.belly);
+    rounded(33,19,15,28,7,palette.body);
+    rounded(28,5,28,25,8,palette.head);
+    rounded(47,16,16,11,5,palette.head);
+    polygon([[17,34],[22,22],[29,34]],palette.detail);
+    rounded(38,39,14,7,4,palette.head);
+    ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(43,13,4,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#403e50";ctx.beginPath();ctx.arc(44,13,2,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle="#37633b";ctx.beginPath();ctx.arc(57,19,1.7,0,Math.PI*2);ctx.fill();
+    const swing=run?Math.sin(run)*5:0;
+    rounded(15,53+swing,10,17,4,palette.body);
+    rounded(31,53-swing,10,17,4,palette.body);
+    rounded(12,66+swing,16,6,3,palette.detail);
+    rounded(28,66-swing,16,6,3,palette.detail);
+    ctx.restore();
+  }
+  function drawObstacle(o) {
+    const y=GROUND-o.height, d=o.width*.22;
+    ctx.fillStyle="rgba(28,54,42,.22)";ctx.beginPath();ctx.ellipse(o.x+o.width*.6,GROUND,o.width*.7,8,0,0,Math.PI*2);ctx.fill();
+    polygon([[o.x,y],[o.x+d,y-d*.42],[o.x+o.width+d,y-d*.42],[o.x+o.width,y]],"#f59e59");
+    polygon([[o.x+o.width,y],[o.x+o.width+d,y-d*.42],[o.x+o.width+d,GROUND-d*.42],[o.x+o.width,GROUND]],"#8e462f");
+    ctx.fillStyle="#da7040";ctx.strokeStyle="#773d30";ctx.lineWidth=2;ctx.fillRect(o.x,y,o.width,o.height);ctx.strokeRect(o.x,y,o.width,o.height);
+    ctx.fillStyle="#fac06a";ctx.fillRect(o.x+o.width*.5-2.5,y+6,5,o.height-12);
+  }
+  function drawHUD() {
+    ctx.fillStyle="rgba(69,83,133,.92)";ctx.fillRect(0,0,W,78);
+    text("CARRERITAS DINO",24,28,22,"#fff",800,"left");
+    text(`NIVEL ${state.level} / 10`,245,30,21,"#ffe27d",800,"left");
+    text(`DINO: ${palettes[state.selected].name.toUpperCase()}`,430,29,14,"#d9f7de",700,"left");
+    text("SALTAR: ESPACIO  ·  PAUSA: P  ·  SONIDO: M",610,29,13,"#fff",600,"left");
+    rounded(24,60,912,8,4,"#52648a");
+    rounded(24,60,912*Math.min(state.levelTime/12,1),8,4,"#7ce4a0");
+    if(state.muted) text("SONIDO: DESACTIVADO",24,568,14,"#fff1a8",700,"left");
+  }
+  function button(x,y,w,h,label,fill,selected=false,size=20) {
+    rounded(x,y+4,w,h,16,"rgba(95,72,131,.16)");
+    rounded(x,y,w,h,16,fill,selected?"#8b5daf":"rgba(255,255,255,.95)",selected?4:2);
+    text(label,x+w/2,y+h/2,size,"#584b7b",800);
+  }
+  function drawMenu() {
+    ctx.fillStyle="rgba(117,166,218,.36)";ctx.fillRect(0,0,W,H);
+    rounded(190,65,580,470,28,"#fff6fc","#ef9dcc",4);
+    const confetti=["#9fdcf6","#d6b5f4","#ffcdda","#ffe099","#b4e2d3","#ffc293"];
+    for(let i=0;i<24;i++) {
+      const x=205+(i*83%550), y=77+(i*47%440), r=5+(i%3)*2;
+      ctx.fillStyle=confetti[i%confetti.length];ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    }
+    rounded(270,72,420,66,18,"#ffdfef","#fff",2);
+    drawDino(254,129,.7,palettes[1]);drawDino(692,129,.7,{body:"#a597e7",head:"#b7a9ef",belly:"#e8e0ff",detail:"#ffe18a"});
+    text("Carreritas Dino",480,103,43,"#8153ab",900);
+    text("Tu aventura empieza aqui",480,153,21,"#597195",700);
+    text("ELIGE TU DINOSAURIO",480,189,17,"#716099",800);
+    for(let i=0;i<3;i++) {
+      const x=267+i*147, p=palettes[i];
+      rounded(x,212,132,56,i===state.selected?14:12,i===state.selected?"#ffe0f0":"#e0f2fc",i===state.selected?"#e67eb5":"#8fc4dd",i===state.selected?3:2);
+      drawDino(x+19,250,.33,p);
+      text(p.name,x+88,240,16,"#575680",800);
+    }
+    button(330,292,300,52,"JUGAR","#ffbfdA",state.selectedMenu===0,22);
+    button(330,357,300,52,"INSTRUCCIONES","#cab4ef",state.selectedMenu===1,19);
+    button(330,422,300,52,"SALIR","#a9dcf4",state.selectedMenu===2,22);
+    text("Flechas y Enter, o haz clic para jugar",480,494,14,"#666f96",700);
+    if(state.muted)text("SONIDO DESACTIVADO (M)",480,518,13,"#b65d82",700);
+  }
+  function drawInstructions() {
+    drawMenu();
+    rounded(190,65,580,470,28,"#fff6fc","#ef9dcc",4);
+    text("COMO JUGAR",480,116,38,"#8153ab",900);
+    text("ESPACIO, W o flecha arriba: saltar",480,190,21,"#4e668f",700);
+    text("Esquiva los obstaculos",480,237,21,"#4e668f",700);
+    text("Completa cada nivel para ganar",480,284,21,"#4e668f",700);
+    text("P: pausa     M: sonido",480,340,19,"#4e668f",700);
+    button(330,425,300,52,"VOLVER","#b9def5",false,21);
+  }
+  function drawPause() {
+    ctx.fillStyle="rgba(36,43,73,.56)";ctx.fillRect(0,0,W,H);
+    rounded(250,165,460,300,28,"#fff6fc","#e6a0d3",4);
+    text("Tomemos un descanso",480,214,32,"#8153ab",900);
+    button(330,263,300,48,"CONTINUAR","#ffbfda",state.selectedPause===0,19);
+    button(330,321,300,48,"VOLVER AL MENU","#cab4ef",state.selectedPause===1,18);
+    button(330,379,300,48,"SALIR DEL JUEGO","#a9dcf4",state.selectedPause===2,18);
+    text("P o Escape: continuar",480,444,14,"#666f96",700);
+  }
+  function drawExit() {
+    ctx.fillStyle="rgba(62,54,91,.62)";ctx.fillRect(0,0,W,H);
+    rounded(230,185,500,230,28,"#fff6fc","#e6a0d3",4);
+    text("Quieres salir del juego?",480,239,29,"#8153ab",900);
+    text("Tu partida se cerrara",480,285,18,"#597195",700);
+    button(310,350,160,52,"SI, SALIR","#ffbfda",state.exitSelection===0,16);
+    button(490,350,160,52,"NO, VOLVER","#a9dcf4",state.exitSelection===1,16);
+    text("Enter: elegir     Escape: volver",480,426,14,"#666f96",700);
+  }
+  function drawEnd() {
+    ctx.fillStyle="rgba(36,43,73,.56)";ctx.fillRect(0,0,W,H);
+    rounded(250,205,460,190,28,"#fff6fc","#e6a0d3",4);
+    text(state.won?"LO LOGRASTE":"FIN DE LA PARTIDA",480,254,36,state.won?"#7b9d56":"#d57587",900);
+    text(state.won?"Superaste los 10 niveles":`Llegaste al nivel ${state.level}`,480,305,21,"#594878",700);
+    text(state.won?"Pulsa Enter para jugar otra vez":"Pulsa R para intentarlo de nuevo",480,350,18,"#594878",700);
+  }
+  function drawClosed() {
+    ctx.fillStyle="rgba(62,54,91,.62)";ctx.fillRect(0,0,W,H);
+    rounded(230,185,500,230,28,"#fff6fc","#e6a0d3",4);
+    text("Gracias por jugar!",480,245,34,"#8153ab",900);
+    text("Ya puedes cerrar esta pestana",480,298,21,"#597195",700);
+    button(330,350,300,52,"VOLVER AL JUEGO","#a9dcf4",false,19);
+  }
+  function render(dt) {
+    drawBackground(dt);
+    for(const o of state.obstacles)drawObstacle(o);
+    drawDino(PLAYER_X,state.playerY,1,palettes[state.selected],state.animation);
+    drawHUD();
+    if(state.screen==="menu")drawMenu();
+    else if(state.screen==="instructions")drawInstructions();
+    else if(state.paused)drawPause();
+    else if(state.over||state.won)drawEnd();
+    else if(state.screen==="closed")drawClosed();
+    if(state.exitConfirmation)drawExit();
+  }
+  function update(dt) {
+    if(state.screen!=="game"||state.paused||state.over||state.won||state.exitConfirmation)return;
+    const speed=365+(state.level-1)*37;
+    state.levelTime+=dt;state.animation+=dt*(7+state.level);
+    state.distance+=speed*dt;
+    state.playerY+=state.velocity*dt;state.velocity+=1750*dt;
+    if(state.playerY>=GROUND-PLAYER_H){state.playerY=GROUND-PLAYER_H;state.velocity=0;}
+    state.spawnTime+=dt;
+    if(state.spawnTime>=state.spawnDelay) {
+      state.obstacles.push({x:W+10,width:rand(36,54),height:rand(42+state.level,62+state.level*2)});
+      state.spawnTime=0;
+      state.spawnDelay=rand(620-state.level*5,850-state.level*5)/speed;
+    }
+    for(const o of state.obstacles)o.x-=speed*dt;
+    state.obstacles=state.obstacles.filter(o=>o.x+o.width>0);
+    const left=PLAYER_X+7,right=PLAYER_X+PLAYER_W-7,top=state.playerY+5,bottom=state.playerY+PLAYER_H;
+    if(state.obstacles.some(o=>right>o.x&&left<o.x+o.width&&bottom>GROUND-o.height&&top<GROUND)) {
+      state.over=true;stopRunningSound();tone(190,90,.24,.16,"triangle");
+    }
+    if(state.levelTime>=12) {
+      if(state.level===10){state.won=true;stopRunningSound();}
+      else {state.level++;state.levelTime=0;state.spawnTime=0;state.spawnDelay=1.05;state.obstacles=[];tone(523,784,.35,.12);}
+    }
+  }
+  function frame(now) {
+    const dt=Math.min((now-state.lastTime)/1000||0,0.05);state.lastTime=now;
+    update(dt);syncAudio();render(dt);requestAnimationFrame(frame);
+  }
+  function jump() {
+    if(state.screen!=="game"||state.exitConfirmation||state.over||state.won)return;
+    if(state.paused){state.paused=false;syncAudio();return;}
+    if(state.playerY>=GROUND-PLAYER_H) {
+      state.velocity=-720;tone(520,820,.16,.13);
+    }
+  }
+  function canvasPoint(event) {
+    const rect=canvas.getBoundingClientRect();
+    return {x:(event.clientX-rect.left)*W/rect.width,y:(event.clientY-rect.top)*H/rect.height};
+  }
+  function click(event) {
+    const {x,y}=canvasPoint(event);canvas.focus();
+    if(state.screen==="closed") {
+      if(y>=345&&y<=410&&x>=330&&x<=630)state.screen="menu";
+      return;
+    }
+    if(state.exitConfirmation) {
+      if(y>=345&&y<=410&&x>=310&&x<=470){state.exitConfirmation=false;state.screen="closed";stopRunningSound();}
+      else if(y>=345&&y<=410&&x>=490&&x<=650)state.exitConfirmation=false;
+      return;
+    }
+    if(state.screen==="menu") {
+      if(y>=212&&y<=268&&x>=267&&x<=693)state.selected=Math.max(0,Math.min(2,Math.floor((x-267)/147)));
+      else if(y>=292&&y<=344&&x>=330&&x<=630){newGame();}
+      else if(y>=357&&y<=409&&x>=330&&x<=630)state.screen="instructions";
+      else if(y>=422&&y<=474&&x>=330&&x<=630)state.exitConfirmation=true;
+    } else if(state.screen==="instructions") {
+      if(y>=425&&y<=480&&x>=330&&x<=630)state.screen="menu";
+    } else if(state.paused) {
+      if(y>=263&&y<=311&&x>=330&&x<=630){state.paused=false;syncAudio();}
+      else if(y>=321&&y<=369&&x>=330&&x<=630){state.paused=false;state.screen="menu";syncAudio();}
+      else if(y>=379&&y<=427&&x>=330&&x<=630)state.exitConfirmation=true;
+    } else if(state.screen==="game")jump();
+  }
+  canvas.addEventListener("pointerdown",click);
+  canvas.addEventListener("keydown",event=>event.preventDefault());
+  window.addEventListener("keydown",event=>{
+    const key=event.key.toLowerCase();
+    if([" ","arrowup","arrowdown"].includes(key))event.preventDefault();
+    if(state.exitConfirmation) {
+      if(key==="escape"||key==="n")state.exitConfirmation=false;
+      else if(key==="enter"||key==="y"){state.exitConfirmation=false;state.screen="closed";stopRunningSound();}
+      else if(key==="arrowleft"||key==="arrowright")state.exitSelection=1-state.exitSelection;
+      return;
+    }
+    if(state.screen==="menu") {
+      if(key==="arrowup"||key==="w")state.selectedMenu=(state.selectedMenu+2)%3;
+      else if(key==="arrowdown"||key==="s")state.selectedMenu=(state.selectedMenu+1)%3;
+      else if(key==="1"||key==="2"||key==="3")state.selected=Number(key)-1;
+      else if(key==="enter") {
+        if(state.selectedMenu===0)newGame();
+        else if(state.selectedMenu===1)state.screen="instructions";
+        else state.exitConfirmation=true;
+      } else if(key==="escape")state.exitConfirmation=true;
+      else if(key==="m")state.muted=!state.muted;
+    } else if(state.screen==="instructions") {
+      if(key==="escape"||key==="backspace")state.screen="menu";
+      else if(key==="enter")newGame();
+      else if(key==="m")state.muted=!state.muted;
+    } else if(state.screen==="closed") {
+      if(key==="enter")state.screen="menu";
+    } else if(state.screen==="game") {
+      if(state.over&&key==="r"){restart();syncAudio();}
+      else if(state.won&&key==="enter"){restart();syncAudio();}
+      else if(state.paused) {
+        if(key==="escape"||key==="p"||key===" ")state.paused=false;
+        else if(key==="arrowup"||key==="w")state.selectedPause=(state.selectedPause+2)%3;
+        else if(key==="arrowdown"||key==="s")state.selectedPause=(state.selectedPause+1)%3;
+        else if(key==="enter") {
+          if(state.selectedPause===0)state.paused=false;
+          else if(state.selectedPause===1){state.paused=false;state.screen="menu";}
+          else state.exitConfirmation=true;
+        }
+      } else if(key==="escape"||key==="p")state.paused=true;
+      else if(key==="m")state.muted=!state.muted;
+      else if([" ","arrowup","w"].includes(key))jump();
+      syncAudio();
+    }
+  });
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
